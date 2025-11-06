@@ -50,11 +50,7 @@ const batteryStore = {};
   };
 
   console.log("Adding authentication entry to browser's local storage...");
-  const defaultTheme = { theme: "" }; // Homeassistant Default Theme is empty
-  const themeToUse = process.env.HA_THEME
-    ? { theme: process.env.HA_THEME }
-    : defaultTheme;
-
+  
   await page.evaluate(
     (hassTokens, selectedLanguage, selectedTheme) => {
       localStorage.setItem("hassTokens", hassTokens);
@@ -63,7 +59,7 @@ const batteryStore = {};
     },
     JSON.stringify(hassTokens),
     JSON.stringify(config.language),
-    JSON.stringify(themeToUse)
+    JSON.stringify(config.theme)
   );
 
   page.close();
