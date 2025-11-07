@@ -410,11 +410,34 @@ async function convertImageToKindleCompatiblePngAsync(
     // Determine output format and apply format-specific options
     switch (pageConfig.imageFormat.toLowerCase()) {
       case 'png':
-        image = image.png({
-          quality: 100,
-          compressionLevel: 9,
-          colours: pageConfig.grayscaleDepth === 1 ? 2 : (pageConfig.grayscaleDepth === 4 ? 16 : 256)
-        });
+        // For grayscale PNG, ensure proper format instead of indexed color
+        if (pageConfig.colorMode === 'GrayScale' || pageConfig.colorMode === 'Grayscale') {
+          if (pageConfig.grayscaleDepth === 4) {
+            // For 4-bit grayscale, reduce to 16 levels and ensure grayscale format
+            image = image
+              .toColorspace('b-w') // Force grayscale colorspace
+              .png({
+                quality: 100,
+                compressionLevel: 9,
+                palette: false, // Ensure no palette/indexed color
+                colours: 16 // Limit to 16 colors for 4-bit
+              });
+          } else {
+            // For 8-bit grayscale - force grayscale colorspace
+            image = image
+              .toColorspace('b-w') // Force grayscale colorspace
+              .png({
+                quality: 100,
+                compressionLevel: 9,
+                palette: false // Ensure no palette/indexed color
+              });
+          }
+        } else {
+          image = image.png({
+            quality: 100,
+            compressionLevel: 9
+          });
+        }
         break;
       case 'bmp':
         image = image.bmp();
