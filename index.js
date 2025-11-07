@@ -6,46 +6,7 @@ const { promises: fs } = require("fs");
 const fsExtra = require("fs-extra");
 const puppeteer = require("puppeteer");
 const { CronJob } = require("cron");
-const gm = require("gm");
-
-// Network connectivity test function
-async function testConnectivity(url) {
-  return new Promise((resolve) => {
-    const urlObj = new URL(url);
-    const isHttps = urlObj.protocol === 'https:';
-    const client = isHttps ? https : http;
-    const port = urlObj.port || (isHttps ? 443 : 80);
-
-    const startTime = Date.now();
-    const req = client.request({
-      hostname: urlObj.hostname,
-      port: port,
-      path: '/',
-      method: 'HEAD',
-      timeout: 10000,
-      rejectUnauthorized: !config.ignoreCertificateErrors
-    }, (res) => {
-      const responseTime = Date.now() - startTime;
-      console.log(`✓ Connectivity test to ${urlObj.hostname}:${port} - Status: ${res.statusCode} (${responseTime}ms)`);
-      resolve({ success: true, statusCode: res.statusCode, responseTime });
-    });
-
-    req.on('error', (err) => {
-      const responseTime = Date.now() - startTime;
-      console.error(`✗ Connectivity test to ${urlObj.hostname}:${port} failed - ${err.message} (${responseTime}ms)`);
-      resolve({ success: false, error: err.message, responseTime });
-    });
-
-    req.on('timeout', () => {
-      const responseTime = Date.now() - startTime;
-      console.error(`✗ Connectivity test to ${urlObj.hostname}:${port} timed out (${responseTime}ms)`);
-      req.destroy();
-      resolve({ success: false, error: 'timeout', responseTime });
-    });
-
-    req.end();
-  });
-}
+const sharp = require("sharp");
 
 // keep state of current battery level and whether the device is charging
 const batteryStore = {};
@@ -73,10 +34,7 @@ const batteryStore = {};
     ].filter((x) => x),
     defaultViewport: null,
     timeout: config.browserLaunchTimeout,
-    headless: config.debug !== true,
-    env: {
-      TZ: config.timezone, // ensures node + chromium see same timezone
-    }
+    headless: config.debug !== true
   });
 
   console.log(`Visiting '${config.baseUrl}' to login...`);
@@ -92,7 +50,7 @@ const batteryStore = {};
   };
 
   console.log("Adding authentication entry to browser's local storage...");
-  
+
   await page.evaluate(
     (hassTokens, selectedLanguage, selectedTheme) => {
       localStorage.setItem("hassTokens", hassTokens);
@@ -115,11 +73,12 @@ const batteryStore = {};
     console.log("Starting first render...");
     await renderAndConvertAsync(browser);
     console.log("Starting rendering cronjob...");
-    new CronJob({
-      cronTime: config.cronJob,
-      onTick: () => renderAndConvertAsync(browser),
-      start: true
-    });
+    new CronJob(
+      String(config.cronJob),
+      () => renderAndConvertAsync(browser),
+      null,
+      true
+    );
   }
 
   const httpServer = http.createServer(async (request, response) => {
@@ -206,9 +165,6 @@ const batteryStore = {};
 })();
 
 async function renderAndConvertAsync(browser) {
-  const startTime = new Date();
-  console.log(`Starting render cycle for ${config.pages.length} page(s) at ${startTime.toISOString()}`);
-
   for (let pageIndex = 0; pageIndex < config.pages.length; pageIndex++) {
     const pageConfig = config.pages[pageIndex];
     const pageBatteryStore = batteryStore[pageIndex];
@@ -220,35 +176,18 @@ async function renderAndConvertAsync(browser) {
 
     const tempPath = outputPath + ".temp";
 
-    console.log(`[Page ${pageIndex + 1}/${config.pages.length}] Rendering ${url} to image...`);
-    const pageStartTime = new Date();
-    const renderSuccess = await renderUrlToImageAsync(browser, pageConfig, url, tempPath);
-    const renderTime = new Date() - pageStartTime;
+    console.log(`Rendering ${url} to image...`);
+    await renderUrlToImageAsync(browser, pageConfig, url, tempPath);
 
-    if (renderSuccess) {
-      console.log(`[Page ${pageIndex + 1}/${config.pages.length}] Converting rendered screenshot (${renderTime}ms render time)...`);
-      try {
-        const conversionStartTime = new Date();
-        await convertImageToKindleCompatiblePngAsync(
-          pageConfig,
-          tempPath,
-          outputPath
-        );
-        const conversionTime = new Date() - conversionStartTime;
-        console.log(`[Page ${pageIndex + 1}/${config.pages.length}] ✓ Successfully processed ${url} (render: ${renderTime}ms, conversion: ${conversionTime}ms)`);
-      } catch (conversionError) {
-        console.error(`[Page ${pageIndex + 1}/${config.pages.length}] ✗ Failed to convert image for ${url}:`, conversionError.message);
-      }
+    console.log(`Converting rendered screenshot of ${url} to grayscale...`);
+    await convertImageToKindleCompatiblePngAsync(
+      pageConfig,
+      tempPath,
+      outputPath
+    );
 
-      // Clean up temp file only if it was created
-      try {
-        await fs.unlink(tempPath);
-      } catch (unlinkError) {
-        // Ignore unlink errors - file may not exist
-      }
-    } else {
-      console.error(`[Page ${pageIndex + 1}/${config.pages.length}] ✗ Skipping image conversion for ${url} due to render failure (${renderTime}ms)`);
-    }
+    fs.unlink(tempPath);
+    console.log(`Finished ${url}`);
 
     if (
       pageBatteryStore &&
@@ -262,9 +201,6 @@ async function renderAndConvertAsync(browser) {
       );
     }
   }
-
-  const totalTime = new Date() - startTime;
-  console.log(`Completed render cycle in ${totalTime}ms`);
 }
 
 function sendBatteryLevelToHomeAssistant(
@@ -299,26 +235,10 @@ function sendBatteryLevelToHomeAssistant(
 
 async function renderUrlToImageAsync(browser, pageConfig, url, path) {
   let page;
-
-  // Test network connectivity first
-  console.log(`Testing connectivity to ${url}...`);
-  const connectivityResult = await testConnectivity(url);
-  if (!connectivityResult.success) {
-    console.error(`Cannot proceed with render - connectivity test failed`);
-    return false;
-  }
-
   try {
     page = await browser.newPage();
 
-    // Enable detailed logging
-    page.on('console', msg => console.log(`[BROWSER] ${msg.type().toUpperCase()}: ${msg.text()}`));
-    page.on('pageerror', err => console.error(`[PAGE ERROR] ${err.message}`));
-    page.on('requestfailed', request => console.warn(`[REQUEST FAILED] ${request.url()}: ${request.failure().errorText}`));
-
-    // Force timezone in the browser context
     await page.emulateTimezone(config.timezone);
-    console.log(`Set browser timezone to: ${config.timezone}`);
 
     await page.emulateMediaFeatures([
       {
@@ -341,103 +261,17 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
 
     await page.setViewport(size);
 
-    // Force timezone override in the browser context BEFORE page loads
-    await page.evaluateOnNewDocument((timezone) => {
-      // Store original functions
-      const originalDateTimeFormat = Intl.DateTimeFormat;
-
-      // Create a completely new constructor that always uses our timezone
-      Intl.DateTimeFormat = function(locales, options) {
-        options = options || {};
-        // Always force our timezone unless explicitly specified
-        if (!options.timeZone) {
-          options.timeZone = timezone;
-        }
-        return new originalDateTimeFormat(locales, options);
-      };
-
-      // Copy static methods
-      Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
-
-      // Override the prototype to handle existing instances
-      Intl.DateTimeFormat.prototype = Object.create(originalDateTimeFormat.prototype);
-      Intl.DateTimeFormat.prototype.constructor = Intl.DateTimeFormat;
-
-      // Override resolvedOptions to always return our timezone
-      Intl.DateTimeFormat.prototype.resolvedOptions = function() {
-        const original = originalDateTimeFormat.prototype.resolvedOptions.call(this);
-        // Force timezone in resolved options
-        return {
-          ...original,
-          timeZone: timezone
-        };
-      };
-
-      // Also override the default constructor directly
-      const defaultFormatter = new originalDateTimeFormat();
-      const originalResolvedOptions = defaultFormatter.resolvedOptions;
-
-      // Override global default timezone detection
-      Object.defineProperty(Intl, 'DateTimeFormat', {
-        value: function(locales, options) {
-          options = options || {};
-          if (!options.timeZone) {
-            options.timeZone = timezone;
-          }
-          const formatter = new originalDateTimeFormat(locales, options);
-
-          // Override this instance's resolvedOptions
-          formatter.resolvedOptions = function() {
-            return {
-              ...originalDateTimeFormat.prototype.resolvedOptions.call(this),
-              timeZone: timezone
-            };
-          };
-
-          return formatter;
-        },
-        writable: false,
-        configurable: false
-      });
-
-      // Copy static methods to new constructor
-      Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
-
-      console.log(`Aggressive timezone override injected: ${timezone}`);
-    }, config.timezone);
-
     console.log(`Navigating to ${url}...`);
-    const startTime = new Date().valueOf();
-
     await page.goto(url, {
       waitUntil: ["domcontentloaded", "load", "networkidle0"],
       timeout: config.renderingTimeout
     });
 
-    // Verify timezone is set correctly in the browser
-    const browserTimezone = await page.evaluate(() => {
-      const date = new Date();
-      return {
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        offset: date.getTimezoneOffset(),
-        localTime: date.toString(),
-        isoTime: date.toISOString()
-      };
-    });
-    console.log(`Browser timezone info:`, browserTimezone);
-
-    const navigateTimespan = new Date().valueOf() - startTime;
-    console.log(`Page navigation completed in ${navigateTimespan}ms`);
-
     console.log(`Waiting for home-assistant element...`);
-    const selectorStartTime = new Date().valueOf();
     await page.waitForSelector("home-assistant", {
-      timeout: Math.max(config.renderingTimeout - navigateTimespan, 1000)
+      timeout: config.renderingTimeout
     });
-    const selectorTimespan = new Date().valueOf() - selectorStartTime;
-    console.log(`home-assistant element found in ${selectorTimespan}ms`);
 
-    console.log(`Applying styling and preparing for screenshot...`);
     await page.addStyleTag({
       content: `
         body {
@@ -448,14 +282,13 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
 
     if (pageConfig.renderingDelay > 0) {
       console.log(`Waiting ${pageConfig.renderingDelay}ms before screenshot...`);
-      await page.waitForTimeout(pageConfig.renderingDelay);
+      await new Promise(resolve => setTimeout(resolve, pageConfig.renderingDelay));
     }
 
     console.log(`Taking screenshot...`);
-    const screenshotStartTime = new Date().valueOf();
     await page.screenshot({
       path,
-      type: 'png', // Always use PNG for screenshot
+      type: 'png',
       captureBeyondViewport: false,
       clip: {
         x: 0,
@@ -463,27 +296,10 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
         ...size
       }
     });
-    const screenshotTimespan = new Date().valueOf() - screenshotStartTime;
 
-    console.log(`Successfully rendered screenshot for ${url} (screenshot: ${screenshotTimespan}ms)`);
-    return true; // Success
+    console.log(`Successfully rendered screenshot for ${url}`);
   } catch (e) {
     console.error(`Failed to render ${url}:`, e.message);
-    if (e.name === 'TimeoutError') {
-      console.error(`Navigation timeout after ${config.renderingTimeout}ms - consider increasing RENDERING_TIMEOUT environment variable`);
-
-      // Take a debug screenshot on timeout to see what state the page is in
-      try {
-        if (page) {
-          const debugPath = path.replace('.temp', '.debug.png');
-          await page.screenshot({ path: debugPath, fullPage: true });
-          console.log(`Debug screenshot saved to ${debugPath}`);
-        }
-      } catch (debugError) {
-        console.error(`Could not take debug screenshot: ${debugError.message}`);
-      }
-    }
-    return false; // Failure
   } finally {
     if (config.debug === false && page) {
       await page.close();
@@ -491,36 +307,91 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
   }
 }
 
-function convertImageToKindleCompatiblePngAsync(
+async function convertImageToKindleCompatiblePngAsync(
   pageConfig,
   inputPath,
   outputPath
 ) {
-  return new Promise((resolve, reject) => {
-    let gmInstance = gm(inputPath)
-      .options({
-        imageMagick: config.useImageMagick === true
-      })
-      .gamma(pageConfig.removeGamma ? 1.0 / 2.2 : 1.0)
-      .modulate(100, 100 * pageConfig.saturation)
-      .contrast(pageConfig.contrast)
-      .dither(pageConfig.dither)
-      .rotate("white", pageConfig.rotation)
-      .type(pageConfig.colorMode)
-      .level(pageConfig.blackLevel, pageConfig.whiteLevel)
-      .bitdepth(pageConfig.grayscaleDepth);
+  try {
+    let image = sharp(inputPath);
 
-    // For BMP format, we don't set quality since it's not applicable
-    if (pageConfig.imageFormat !== 'bmp') {
-      gmInstance = gmInstance.quality(100);
+    // Apply gamma correction if needed
+    if (pageConfig.removeGamma) {
+      image = image.gamma(1.0 / 2.2);
     }
 
-    gmInstance.write(outputPath, (err) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve();
+    // Apply rotation if needed
+    const rotation = Number(pageConfig.rotation);
+    if (rotation !== 0) {
+      image = image.rotate(rotation, { background: '#ffffff' });
+    }
+
+    // Convert to grayscale and apply color mode
+    if (pageConfig.colorMode === 'GrayScale' || pageConfig.colorMode === 'Grayscale') {
+      image = image.grayscale();
+    }
+
+    // Apply modulation (saturation adjustment)
+    if (pageConfig.saturation !== 1) {
+      image = image.modulate({
+        saturation: pageConfig.saturation
+      });
+    }
+
+    // Apply contrast and other adjustments
+    if (pageConfig.contrast !== 1) {
+      // Sharp uses linear transformation for contrast adjustment
+      image = image.linear(pageConfig.contrast, -(128 * pageConfig.contrast) + 128);
+    }
+
+    // Apply level adjustments (black and white levels)
+    if (pageConfig.blackLevel !== '0%' || pageConfig.whiteLevel !== '100%') {
+      // Parse percentage values
+      const blackLevel = parseInt(pageConfig.blackLevel.replace('%', '')) / 100;
+      const whiteLevel = parseInt(pageConfig.whiteLevel.replace('%', '')) / 100;
+
+      // Apply level adjustment using Sharp's normalize
+      if (blackLevel > 0 || whiteLevel < 1) {
+        const inputMin = Math.round(blackLevel * 255);
+        const inputMax = Math.round(whiteLevel * 255);
+        const multiplier = 255 / (inputMax - inputMin);
+        const offset = -inputMin * multiplier;
+
+        image = image.linear(multiplier, offset);
       }
-    });
-  });
+    }
+
+    // Apply dithering through Sharp's processing (limited support)
+    // Note: Sharp doesn't have direct dithering support like GM
+    if (pageConfig.dither) {
+      // Apply slight noise to simulate dithering effect for e-ink displays
+      image = image.sharpen({ sigma: 0.5, m1: 0.5, m2: 2, x1: 2, y2: 10, y3: 20 });
+    }
+
+    // Determine output format and apply format-specific options
+    switch (pageConfig.imageFormat.toLowerCase()) {
+      case 'png':
+        image = image.png({
+          quality: 100,
+          compressionLevel: 9,
+          colours: pageConfig.grayscaleDepth === 1 ? 2 : (pageConfig.grayscaleDepth === 4 ? 16 : 256)
+        });
+        break;
+      case 'bmp':
+        image = image.bmp();
+        break;
+      case 'jpg':
+      case 'jpeg':
+        image = image.jpeg({ quality: 100 });
+        break;
+      default:
+        image = image.png({ quality: 100 });
+    }
+
+    // Write the processed image
+    await image.toFile(outputPath);
+
+  } catch (error) {
+    throw error;
+  }
 }
