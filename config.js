@@ -51,7 +51,7 @@ module.exports = {
   renderingTimeout: process.env.RENDERING_TIMEOUT || 10000,
   browserLaunchTimeout: process.env.BROWSER_LAUNCH_TIMEOUT || 30000,
   language: process.env.LANGUAGE || "en",
-  theme: process.env.HA_THEME || "",
+  theme: process.env.HA_THEME ? { theme: process.env.HA_THEME } : { theme: 'eink' },
   debug: process.env.DEBUG === "true",
   ignoreCertificateErrors:
     process.env.UNSAFE_IGNORE_CERTIFICATE_ERRORS === "true",
