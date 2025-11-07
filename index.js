@@ -8,6 +8,45 @@ const puppeteer = require("puppeteer");
 const { CronJob } = require("cron");
 const gm = require("gm");
 
+// Network connectivity test function
+async function testConnectivity(url) {
+  return new Promise((resolve) => {
+    const urlObj = new URL(url);
+    const isHttps = urlObj.protocol === 'https:';
+    const client = isHttps ? https : http;
+    const port = urlObj.port || (isHttps ? 443 : 80);
+
+    const startTime = Date.now();
+    const req = client.request({
+      hostname: urlObj.hostname,
+      port: port,
+      path: '/',
+      method: 'HEAD',
+      timeout: 10000,
+      rejectUnauthorized: !config.ignoreCertificateErrors
+    }, (res) => {
+      const responseTime = Date.now() - startTime;
+      console.log(`✓ Connectivity test to ${urlObj.hostname}:${port} - Status: ${res.statusCode} (${responseTime}ms)`);
+      resolve({ success: true, statusCode: res.statusCode, responseTime });
+    });
+
+    req.on('error', (err) => {
+      const responseTime = Date.now() - startTime;
+      console.error(`✗ Connectivity test to ${urlObj.hostname}:${port} failed - ${err.message} (${responseTime}ms)`);
+      resolve({ success: false, error: err.message, responseTime });
+    });
+
+    req.on('timeout', () => {
+      const responseTime = Date.now() - startTime;
+      console.error(`✗ Connectivity test to ${urlObj.hostname}:${port} timed out (${responseTime}ms)`);
+      req.destroy();
+      resolve({ success: false, error: 'timeout', responseTime });
+    });
+
+    req.end();
+  });
+}
+
 // keep state of current battery level and whether the device is charging
 const batteryStore = {};
 
@@ -260,8 +299,27 @@ function sendBatteryLevelToHomeAssistant(
 
 async function renderUrlToImageAsync(browser, pageConfig, url, path) {
   let page;
+
+  // Test network connectivity first
+  console.log(`Testing connectivity to ${url}...`);
+  const connectivityResult = await testConnectivity(url);
+  if (!connectivityResult.success) {
+    console.error(`Cannot proceed with render - connectivity test failed`);
+    return false;
+  }
+
   try {
     page = await browser.newPage();
+
+    // Enable detailed logging
+    page.on('console', msg => console.log(`[BROWSER] ${msg.type().toUpperCase()}: ${msg.text()}`));
+    page.on('pageerror', err => console.error(`[PAGE ERROR] ${err.message}`));
+    page.on('requestfailed', request => console.warn(`[REQUEST FAILED] ${request.url()}: ${request.failure().errorText}`));
+
+    // Force timezone in the browser context
+    await page.emulateTimezone(config.timezone);
+    console.log(`Set browser timezone to: ${config.timezone}`);
+
     await page.emulateMediaFeatures([
       {
         name: "prefers-color-scheme",
@@ -282,17 +340,39 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
     }
 
     await page.setViewport(size);
+
+    console.log(`Navigating to ${url}...`);
     const startTime = new Date().valueOf();
+
     await page.goto(url, {
       waitUntil: ["domcontentloaded", "load", "networkidle0"],
       timeout: config.renderingTimeout
     });
 
+    // Verify timezone is set correctly in the browser
+    const browserTimezone = await page.evaluate(() => {
+      const date = new Date();
+      return {
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        offset: date.getTimezoneOffset(),
+        localTime: date.toString(),
+        isoTime: date.toISOString()
+      };
+    });
+    console.log(`Browser timezone info:`, browserTimezone);
+
     const navigateTimespan = new Date().valueOf() - startTime;
+    console.log(`Page navigation completed in ${navigateTimespan}ms`);
+
+    console.log(`Waiting for home-assistant element...`);
+    const selectorStartTime = new Date().valueOf();
     await page.waitForSelector("home-assistant", {
       timeout: Math.max(config.renderingTimeout - navigateTimespan, 1000)
     });
+    const selectorTimespan = new Date().valueOf() - selectorStartTime;
+    console.log(`home-assistant element found in ${selectorTimespan}ms`);
 
+    console.log(`Applying styling and preparing for screenshot...`);
     await page.addStyleTag({
       content: `
         body {
@@ -302,8 +382,12 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
     });
 
     if (pageConfig.renderingDelay > 0) {
+      console.log(`Waiting ${pageConfig.renderingDelay}ms before screenshot...`);
       await page.waitForTimeout(pageConfig.renderingDelay);
     }
+
+    console.log(`Taking screenshot...`);
+    const screenshotStartTime = new Date().valueOf();
     await page.screenshot({
       path,
       type: 'png', // Always use PNG for screenshot
@@ -314,13 +398,25 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
         ...size
       }
     });
+    const screenshotTimespan = new Date().valueOf() - screenshotStartTime;
 
-    console.log(`Successfully rendered screenshot for ${url}`);
+    console.log(`Successfully rendered screenshot for ${url} (screenshot: ${screenshotTimespan}ms)`);
     return true; // Success
   } catch (e) {
     console.error(`Failed to render ${url}:`, e.message);
     if (e.name === 'TimeoutError') {
       console.error(`Navigation timeout after ${config.renderingTimeout}ms - consider increasing RENDERING_TIMEOUT environment variable`);
+
+      // Take a debug screenshot on timeout to see what state the page is in
+      try {
+        if (page) {
+          const debugPath = path.replace('.temp', '.debug.png');
+          await page.screenshot({ path: debugPath, fullPage: true });
+          console.log(`Debug screenshot saved to ${debugPath}`);
+        }
+      } catch (debugError) {
+        console.error(`Could not take debug screenshot: ${debugError.message}`);
+      }
     }
     return false; // Failure
   } finally {
