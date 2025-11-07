@@ -56,4 +56,5 @@ module.exports = {
   debug: process.env.DEBUG === "true",
   ignoreCertificateErrors:
     process.env.UNSAFE_IGNORE_CERTIFICATE_ERRORS === "true",
+  timezone: process.env.TZ || "Europe/Berlin",
 };

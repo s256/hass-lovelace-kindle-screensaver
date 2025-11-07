@@ -27,6 +27,7 @@ options:
   HA_ACCESS_TOKEN: ''
   HA_THEME: ''
   LANGUAGE: 'en'
+  TIMEZONE: 'Europe/Berlin'
   CRON_JOB: '* * * * *'
   RENDERING_TIMEOUT: '60000'
   RENDERING_DELAY: '0'
@@ -50,6 +51,7 @@ schema:
   HA_ACCESS_TOKEN: "password"
   HA_THEME: "str"
   LANGUAGE: "str?"
+  TIMEZONE: "str?"
   CRON_JOB: "str?"
   RENDERING_TIMEOUT: "int?"
   RENDERING_DELAY: "int?"

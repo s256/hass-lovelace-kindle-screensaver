@@ -34,7 +34,10 @@ const batteryStore = {};
     ].filter((x) => x),
     defaultViewport: null,
     timeout: config.browserLaunchTimeout,
-    headless: config.debug !== true
+    headless: config.debug !== true,
+    env: {
+      TZ: config.timezone, // ensures node + chromium see same timezone
+    }
   });
 
   console.log(`Visiting '${config.baseUrl}' to login...`);
@@ -90,7 +93,7 @@ const batteryStore = {};
     const batteryLevel = parseInt(url.searchParams.get("batteryLevel"));
     const isCharging = url.searchParams.get("isCharging");
     const pageNumber =
-      pageNumberStr === "/" ? 1 : parseInt(pageNumberStr.substr(1));
+      pageNumberStr === "/" ? 1 : parseInt(pageNumberStr.substring(1));
     if (
       isFinite(pageNumber) === false ||
       pageNumber > config.pages.length ||
@@ -164,6 +167,9 @@ const batteryStore = {};
 })();
 
 async function renderAndConvertAsync(browser) {
+  const startTime = new Date();
+  console.log(`Starting render cycle for ${config.pages.length} page(s) at ${startTime.toISOString()}`);
+
   for (let pageIndex = 0; pageIndex < config.pages.length; pageIndex++) {
     const pageConfig = config.pages[pageIndex];
     const pageBatteryStore = batteryStore[pageIndex];
@@ -175,18 +181,35 @@ async function renderAndConvertAsync(browser) {
 
     const tempPath = outputPath + ".temp";
 
-    console.log(`Rendering ${url} to image...`);
-    await renderUrlToImageAsync(browser, pageConfig, url, tempPath);
+    console.log(`[Page ${pageIndex + 1}/${config.pages.length}] Rendering ${url} to image...`);
+    const pageStartTime = new Date();
+    const renderSuccess = await renderUrlToImageAsync(browser, pageConfig, url, tempPath);
+    const renderTime = new Date() - pageStartTime;
 
-    console.log(`Converting rendered screenshot of ${url} to grayscale...`);
-    await convertImageToKindleCompatiblePngAsync(
-      pageConfig,
-      tempPath,
-      outputPath
-    );
+    if (renderSuccess) {
+      console.log(`[Page ${pageIndex + 1}/${config.pages.length}] Converting rendered screenshot (${renderTime}ms render time)...`);
+      try {
+        const conversionStartTime = new Date();
+        await convertImageToKindleCompatiblePngAsync(
+          pageConfig,
+          tempPath,
+          outputPath
+        );
+        const conversionTime = new Date() - conversionStartTime;
+        console.log(`[Page ${pageIndex + 1}/${config.pages.length}] ✓ Successfully processed ${url} (render: ${renderTime}ms, conversion: ${conversionTime}ms)`);
+      } catch (conversionError) {
+        console.error(`[Page ${pageIndex + 1}/${config.pages.length}] ✗ Failed to convert image for ${url}:`, conversionError.message);
+      }
 
-    fs.unlink(tempPath);
-    console.log(`Finished ${url}`);
+      // Clean up temp file only if it was created
+      try {
+        await fs.unlink(tempPath);
+      } catch (unlinkError) {
+        // Ignore unlink errors - file may not exist
+      }
+    } else {
+      console.error(`[Page ${pageIndex + 1}/${config.pages.length}] ✗ Skipping image conversion for ${url} due to render failure (${renderTime}ms)`);
+    }
 
     if (
       pageBatteryStore &&
@@ -200,6 +223,9 @@ async function renderAndConvertAsync(browser) {
       );
     }
   }
+
+  const totalTime = new Date() - startTime;
+  console.log(`Completed render cycle in ${totalTime}ms`);
 }
 
 function sendBatteryLevelToHomeAssistant(
@@ -288,10 +314,17 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
         ...size
       }
     });
+
+    console.log(`Successfully rendered screenshot for ${url}`);
+    return true; // Success
   } catch (e) {
-    console.error("Failed to render", e);
+    console.error(`Failed to render ${url}:`, e.message);
+    if (e.name === 'TimeoutError') {
+      console.error(`Navigation timeout after ${config.renderingTimeout}ms - consider increasing RENDERING_TIMEOUT environment variable`);
+    }
+    return false; // Failure
   } finally {
-    if (config.debug === false) {
+    if (config.debug === false && page) {
       await page.close();
     }
   }
