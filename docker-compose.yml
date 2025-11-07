@@ -1,25 +1,45 @@
-version: "3.8"
 
 services:
   app:
     image: sibbl/hass-lovelace-kindle-screensaver:latest
+    networks:
+      - traefik_proxy  
     environment:
-      - HA_BASE_URL=https://your-path-to-home-assistant:8123
+      - TZ=Europe/Berlin
+      - HA_BASE_URL=http://localhost:8123
       - HA_SCREENSHOT_URL=/lovelace?kiosk
-      - HA_ACCESS_TOKEN=eyJ0...
+      - HA_ACCESS_TOKEN=eyddfdf....
       - CRON_JOB=* * * * *
       - RENDERING_TIMEOUT=30000
       - RENDERING_DELAY=0
       - RENDERING_SCREEN_HEIGHT=800
       - RENDERING_SCREEN_WIDTH=600
-      - GRAYSCALE_DEPTH=8
+      - GRAYSCALE_DEPTH=1
       - OUTPUT_PATH=/output/cover
       - LANGUAGE=en
       - ROTATION=0
       - SCALING=1
-    ports:
-      - 5000:5000
+      - HA_BATTERY_WEBHOOK=89aaebcdfdf585a9b344
+    # ports:
+    #   - 5000:5000
     volumes:
-      - ./output/:/output
+      - /opt/ha-kinde/data/output/:/output
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
+    labels:
+      ##################################
+      ## Traefik (new)
+      ##################################
+      traefik.enable: "true"
+
+      # Router for kindle.anothertech.company
+      traefik.http.routers.kindle.rule: "Host(`kindle.example.com`)"
+      traefik.http.routers.kindle.entrypoints: "websecure"
+      traefik.http.routers.kindle.tls.certresolver: "http"
+      # Service for internal port 8090
+      traefik.http.services.kindle.loadbalancer.server.port: "5000"
+      traefik.docker.network: "traefik_proxy"
+
+networks:
+  traefik_proxy:
+    external: true
