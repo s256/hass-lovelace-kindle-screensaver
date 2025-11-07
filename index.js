@@ -51,12 +51,14 @@ const batteryStore = {};
 
   console.log("Adding authentication entry to browser's local storage...");
   await page.evaluate(
-    (hassTokens, selectedLanguage) => {
+    (hassTokens, selectedLanguage, selectedTheme) => {
       localStorage.setItem("hassTokens", hassTokens);
       localStorage.setItem("selectedLanguage", selectedLanguage);
+      localStorage.setItem("selectedTheme", selectedTheme);
     },
     JSON.stringify(hassTokens),
-    JSON.stringify(config.language)
+    JSON.stringify(config.language),
+    JSON.stringify(config.theme)
   );
 
   page.close();
@@ -317,7 +319,7 @@ function convertImageToKindleCompatiblePngAsync(
     if (pageConfig.imageFormat !== 'bmp') {
       gmInstance = gmInstance.quality(100);
     }
-    
+
     gmInstance.write(outputPath, (err) => {
       if (err) {
         reject(err);
