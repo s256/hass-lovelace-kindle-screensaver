@@ -341,6 +341,71 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
 
     await page.setViewport(size);
 
+    // Force timezone override in the browser context BEFORE page loads
+    await page.evaluateOnNewDocument((timezone) => {
+      // Store original functions
+      const originalDateTimeFormat = Intl.DateTimeFormat;
+
+      // Create a completely new constructor that always uses our timezone
+      Intl.DateTimeFormat = function(locales, options) {
+        options = options || {};
+        // Always force our timezone unless explicitly specified
+        if (!options.timeZone) {
+          options.timeZone = timezone;
+        }
+        return new originalDateTimeFormat(locales, options);
+      };
+
+      // Copy static methods
+      Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
+
+      // Override the prototype to handle existing instances
+      Intl.DateTimeFormat.prototype = Object.create(originalDateTimeFormat.prototype);
+      Intl.DateTimeFormat.prototype.constructor = Intl.DateTimeFormat;
+
+      // Override resolvedOptions to always return our timezone
+      Intl.DateTimeFormat.prototype.resolvedOptions = function() {
+        const original = originalDateTimeFormat.prototype.resolvedOptions.call(this);
+        // Force timezone in resolved options
+        return {
+          ...original,
+          timeZone: timezone
+        };
+      };
+
+      // Also override the default constructor directly
+      const defaultFormatter = new originalDateTimeFormat();
+      const originalResolvedOptions = defaultFormatter.resolvedOptions;
+
+      // Override global default timezone detection
+      Object.defineProperty(Intl, 'DateTimeFormat', {
+        value: function(locales, options) {
+          options = options || {};
+          if (!options.timeZone) {
+            options.timeZone = timezone;
+          }
+          const formatter = new originalDateTimeFormat(locales, options);
+
+          // Override this instance's resolvedOptions
+          formatter.resolvedOptions = function() {
+            return {
+              ...originalDateTimeFormat.prototype.resolvedOptions.call(this),
+              timeZone: timezone
+            };
+          };
+
+          return formatter;
+        },
+        writable: false,
+        configurable: false
+      });
+
+      // Copy static methods to new constructor
+      Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
+
+      console.log(`Aggressive timezone override injected: ${timezone}`);
+    }, config.timezone);
+
     console.log(`Navigating to ${url}...`);
     const startTime = new Date().valueOf();
 
