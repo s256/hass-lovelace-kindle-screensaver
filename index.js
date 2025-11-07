@@ -6,7 +6,7 @@ const { promises: fs } = require("fs");
 const fsExtra = require("fs-extra");
 const puppeteer = require("puppeteer");
 const { CronJob } = require("cron");
-const gm = require("gm");
+const sharp = require("sharp");
 
 // keep state of current battery level and whether the device is charging
 const batteryStore = {};
@@ -29,6 +29,16 @@ const batteryStore = {};
     args: [
       "--disable-dev-shm-usage",
       "--no-sandbox",
+      "--disable-gpu",
+      "--disable-software-rasterizer",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-features=TranslateUI",
+      "--disable-ipc-flooding-protection",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--no-zygote",
       `--lang=${config.language}`,
       config.ignoreCertificateErrors && "--ignore-certificate-errors"
     ].filter((x) => x),
@@ -50,6 +60,7 @@ const batteryStore = {};
   };
 
   console.log("Adding authentication entry to browser's local storage...");
+
   await page.evaluate(
     (hassTokens, selectedLanguage, selectedTheme) => {
       localStorage.setItem("hassTokens", hassTokens);
@@ -72,11 +83,12 @@ const batteryStore = {};
     console.log("Starting first render...");
     await renderAndConvertAsync(browser);
     console.log("Starting rendering cronjob...");
-    new CronJob({
-      cronTime: config.cronJob,
-      onTick: () => renderAndConvertAsync(browser),
-      start: true
-    });
+    new CronJob(
+      String(config.cronJob),
+      () => renderAndConvertAsync(browser),
+      null,
+      true
+    );
   }
 
   const httpServer = http.createServer(async (request, response) => {
@@ -89,7 +101,7 @@ const batteryStore = {};
     const batteryLevel = parseInt(url.searchParams.get("batteryLevel"));
     const isCharging = url.searchParams.get("isCharging");
     const pageNumber =
-      pageNumberStr === "/" ? 1 : parseInt(pageNumberStr.substr(1));
+      pageNumberStr === "/" ? 1 : parseInt(pageNumberStr.substring(1));
     if (
       isFinite(pageNumber) === false ||
       pageNumber > config.pages.length ||
@@ -235,6 +247,18 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
   let page;
   try {
     page = await browser.newPage();
+
+    // Add console logging in debug mode
+    if (config.debug) {
+      page.on('console', msg => console.log(`[BROWSER] ${msg.type().toUpperCase()}: ${msg.text()}`));
+      page.on('pageerror', err => console.error(`[PAGE ERROR] ${err.message}`));
+      page.on('requestfailed', request => console.warn(`[REQUEST FAILED] ${request.url()}: ${request.failure().errorText}`));
+      console.log(`[DEBUG] Browser viewport will be: ${pageConfig.renderingScreenSize.width}x${pageConfig.renderingScreenSize.height}`);
+      console.log(`[DEBUG] Timezone: ${config.timezone}, Language: ${config.language}`);
+    }
+
+    await page.emulateTimezone(config.timezone);
+
     await page.emulateMediaFeatures([
       {
         name: "prefers-color-scheme",
@@ -255,16 +279,37 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
     }
 
     await page.setViewport(size);
-    const startTime = new Date().valueOf();
+
+    console.log(`Navigating to ${url}...`);
     await page.goto(url, {
       waitUntil: ["domcontentloaded", "load", "networkidle0"],
       timeout: config.renderingTimeout
     });
 
-    const navigateTimespan = new Date().valueOf() - startTime;
+    console.log(`Waiting for home-assistant element...`);
     await page.waitForSelector("home-assistant", {
-      timeout: Math.max(config.renderingTimeout - navigateTimespan, 1000)
+      timeout: config.renderingTimeout
     });
+
+    // In debug mode, show additional page information
+    if (config.debug) {
+      const pageInfo = await page.evaluate(() => {
+        return {
+          url: window.location.href,
+          title: document.title,
+          userAgent: navigator.userAgent,
+          language: navigator.language,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          hasHomeAssistant: !!document.querySelector('home-assistant'),
+          hasLovelace: !!document.querySelector('hui-view, hui-panel-view'),
+          themeInfo: {
+            selectedTheme: localStorage.getItem('selectedTheme'),
+            hasTokens: !!localStorage.getItem('hassTokens')
+          }
+        };
+      });
+      console.log(`[DEBUG] Page info:`, JSON.stringify(pageInfo, null, 2));
+    }
 
     await page.addStyleTag({
       content: `
@@ -275,11 +320,14 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
     });
 
     if (pageConfig.renderingDelay > 0) {
-      await page.waitForTimeout(pageConfig.renderingDelay);
+      console.log(`Waiting ${pageConfig.renderingDelay}ms before screenshot...`);
+      await new Promise(resolve => setTimeout(resolve, pageConfig.renderingDelay));
     }
+
+    console.log(`Taking screenshot...`);
     await page.screenshot({
       path,
-      type: 'png', // Always use PNG for screenshot
+      type: 'png',
       captureBeyondViewport: false,
       clip: {
         x: 0,
@@ -287,45 +335,125 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
         ...size
       }
     });
+
+    console.log(`Successfully rendered screenshot for ${url}`);
   } catch (e) {
-    console.error("Failed to render", e);
+    console.error(`Failed to render ${url}:`, e.message);
   } finally {
-    if (config.debug === false) {
+    if (config.debug === false && page) {
       await page.close();
     }
   }
 }
 
-function convertImageToKindleCompatiblePngAsync(
+async function convertImageToKindleCompatiblePngAsync(
   pageConfig,
   inputPath,
   outputPath
 ) {
-  return new Promise((resolve, reject) => {
-    let gmInstance = gm(inputPath)
-      .options({
-        imageMagick: config.useImageMagick === true
-      })
-      .gamma(pageConfig.removeGamma ? 1.0 / 2.2 : 1.0)
-      .modulate(100, 100 * pageConfig.saturation)
-      .contrast(pageConfig.contrast)
-      .dither(pageConfig.dither)
-      .rotate("white", pageConfig.rotation)
-      .type(pageConfig.colorMode)
-      .level(pageConfig.blackLevel, pageConfig.whiteLevel)
-      .bitdepth(pageConfig.grayscaleDepth);
+  try {
+    let image = sharp(inputPath);
 
-    // For BMP format, we don't set quality since it's not applicable
-    if (pageConfig.imageFormat !== 'bmp') {
-      gmInstance = gmInstance.quality(100);
+    // Apply gamma correction if needed
+    if (pageConfig.removeGamma) {
+      image = image.gamma(1.0 / 2.2);
     }
 
-    gmInstance.write(outputPath, (err) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve();
+    // Apply rotation if needed
+    const rotation = Number(pageConfig.rotation);
+    if (rotation !== 0) {
+      image = image.rotate(rotation, { background: '#ffffff' });
+    }
+
+    // Convert to grayscale and apply color mode
+    if (pageConfig.colorMode === 'GrayScale' || pageConfig.colorMode === 'Grayscale') {
+      image = image.grayscale();
+    }
+
+    // Apply modulation (saturation adjustment)
+    if (pageConfig.saturation !== 1) {
+      image = image.modulate({
+        saturation: pageConfig.saturation
+      });
+    }
+
+    // Apply contrast and other adjustments
+    if (pageConfig.contrast !== 1) {
+      // Sharp uses linear transformation for contrast adjustment
+      image = image.linear(pageConfig.contrast, -(128 * pageConfig.contrast) + 128);
+    }
+
+    // Apply level adjustments (black and white levels)
+    if (pageConfig.blackLevel !== '0%' || pageConfig.whiteLevel !== '100%') {
+      // Parse percentage values
+      const blackLevel = parseInt(pageConfig.blackLevel.replace('%', '')) / 100;
+      const whiteLevel = parseInt(pageConfig.whiteLevel.replace('%', '')) / 100;
+
+      // Apply level adjustment using Sharp's normalize
+      if (blackLevel > 0 || whiteLevel < 1) {
+        const inputMin = Math.round(blackLevel * 255);
+        const inputMax = Math.round(whiteLevel * 255);
+        const multiplier = 255 / (inputMax - inputMin);
+        const offset = -inputMin * multiplier;
+
+        image = image.linear(multiplier, offset);
       }
-    });
-  });
+    }
+
+    // Apply dithering through Sharp's processing (limited support)
+    // Note: Sharp doesn't have direct dithering support like GM
+    if (pageConfig.dither) {
+      // Apply slight noise to simulate dithering effect for e-ink displays
+      image = image.sharpen({ sigma: 0.5, m1: 0.5, m2: 2, x1: 2, y2: 10, y3: 20 });
+    }
+
+    // Determine output format and apply format-specific options
+    switch (pageConfig.imageFormat.toLowerCase()) {
+      case 'png':
+        // For grayscale PNG, ensure proper format instead of indexed color
+        if (pageConfig.colorMode === 'GrayScale' || pageConfig.colorMode === 'Grayscale') {
+          if (pageConfig.grayscaleDepth === 4) {
+            // For 4-bit grayscale, reduce to 16 levels and ensure grayscale format
+            image = image
+              .toColorspace('b-w') // Force grayscale colorspace
+              .png({
+                quality: 100,
+                compressionLevel: 9,
+                palette: false, // Ensure no palette/indexed color
+                colours: 16 // Limit to 16 colors for 4-bit
+              });
+          } else {
+            // For 8-bit grayscale - force grayscale colorspace
+            image = image
+              .toColorspace('b-w') // Force grayscale colorspace
+              .png({
+                quality: 100,
+                compressionLevel: 9,
+                palette: false // Ensure no palette/indexed color
+              });
+          }
+        } else {
+          image = image.png({
+            quality: 100,
+            compressionLevel: 9
+          });
+        }
+        break;
+      case 'bmp':
+        image = image.bmp();
+        break;
+      case 'jpg':
+      case 'jpeg':
+        image = image.jpeg({ quality: 100 });
+        break;
+      default:
+        image = image.png({ quality: 100 });
+    }
+
+    // Write the processed image
+    await image.toFile(outputPath);
+
+  } catch (error) {
+    throw error;
+  }
 }
