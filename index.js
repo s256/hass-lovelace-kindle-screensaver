@@ -238,6 +238,15 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
   try {
     page = await browser.newPage();
 
+    // Add console logging in debug mode
+    if (config.debug) {
+      page.on('console', msg => console.log(`[BROWSER] ${msg.type().toUpperCase()}: ${msg.text()}`));
+      page.on('pageerror', err => console.error(`[PAGE ERROR] ${err.message}`));
+      page.on('requestfailed', request => console.warn(`[REQUEST FAILED] ${request.url()}: ${request.failure().errorText}`));
+      console.log(`[DEBUG] Browser viewport will be: ${pageConfig.renderingScreenSize.width}x${pageConfig.renderingScreenSize.height}`);
+      console.log(`[DEBUG] Timezone: ${config.timezone}, Language: ${config.language}`);
+    }
+
     await page.emulateTimezone(config.timezone);
 
     await page.emulateMediaFeatures([
@@ -271,6 +280,26 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
     await page.waitForSelector("home-assistant", {
       timeout: config.renderingTimeout
     });
+
+    // In debug mode, show additional page information
+    if (config.debug) {
+      const pageInfo = await page.evaluate(() => {
+        return {
+          url: window.location.href,
+          title: document.title,
+          userAgent: navigator.userAgent,
+          language: navigator.language,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          hasHomeAssistant: !!document.querySelector('home-assistant'),
+          hasLovelace: !!document.querySelector('hui-view, hui-panel-view'),
+          themeInfo: {
+            selectedTheme: localStorage.getItem('selectedTheme'),
+            hasTokens: !!localStorage.getItem('hassTokens')
+          }
+        };
+      });
+      console.log(`[DEBUG] Page info:`, JSON.stringify(pageInfo, null, 2));
+    }
 
     await page.addStyleTag({
       content: `
