@@ -254,7 +254,21 @@ function sendBatteryLevelToHomeAssistant(
   req.end();
 }
 
-async function renderUrlToImageAsync(browser, pageConfig, url, path) {
+async function renderUrlToImageAsync(browser, pageConfig, url, path, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const success = await attemptRender(browser, pageConfig, url, path);
+    if (success) return;
+    if (attempt < retries) {
+      const delay = attempt * 5000;
+      console.log(`Render attempt ${attempt} failed, retrying in ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    } else {
+      console.error(`All ${retries} render attempts failed for ${url}`);
+    }
+  }
+}
+
+async function attemptRender(browser, pageConfig, url, path) {
   let page;
   try {
     page = await browser.newPage();
@@ -348,8 +362,10 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
     });
 
     console.log(`Successfully rendered screenshot for ${url}`);
+    return true;
   } catch (e) {
     console.error(`Failed to render ${url}:`, e.message);
+    return false;
   } finally {
     if (config.debug === false && page) {
       try {
