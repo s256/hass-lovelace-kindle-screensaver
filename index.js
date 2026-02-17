@@ -3,7 +3,6 @@ const path = require("path");
 const http = require("http");
 const https = require("https");
 const { promises: fs } = require("fs");
-const { execSync } = require("child_process");
 const fsExtra = require("fs-extra");
 const puppeteer = require("puppeteer");
 const { CronJob } = require("cron");
@@ -301,7 +300,14 @@ async function renderAndConvertAsync(existingBrowser) {
     }
   } finally {
     if (!existingBrowser) {
+      const proc = browser.process();
       try { await browser.close(); } catch (_) {}
+      // Ensure Chrome process tree is fully dead — browser.close() can leave zombies
+      if (proc && !proc.killed) {
+        proc.kill('SIGKILL');
+      }
+      // Give OS a moment to reclaim memory
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
   }
 }
