@@ -3,10 +3,52 @@ const path = require("path");
 const http = require("http");
 const https = require("https");
 const { promises: fs } = require("fs");
+const { execSync } = require("child_process");
 const fsExtra = require("fs-extra");
 const puppeteer = require("puppeteer");
 const { CronJob } = require("cron");
 const sharp = require("sharp");
+
+function logDiagnostics(label) {
+  try {
+    const memUsage = process.memoryUsage();
+    const nodeMemMB = {
+      rss: (memUsage.rss / 1024 / 1024).toFixed(1),
+      heapUsed: (memUsage.heapUsed / 1024 / 1024).toFixed(1),
+      heapTotal: (memUsage.heapTotal / 1024 / 1024).toFixed(1),
+    };
+    console.log(`[DIAG ${label}] Node memory: rss=${nodeMemMB.rss}MB heap=${nodeMemMB.heapUsed}/${nodeMemMB.heapTotal}MB`);
+  } catch (_) {}
+  try {
+    // Check /dev/shm usage (common Docker issue)
+    const shmDf = execSync("df -h /dev/shm 2>/dev/null || echo 'N/A'").toString().trim();
+    const shmLines = shmDf.split("\n");
+    if (shmLines.length > 1) {
+      console.log(`[DIAG ${label}] /dev/shm: ${shmLines[1]}`);
+    }
+  } catch (_) {}
+  try {
+    // Check container memory limit via cgroup
+    const memLimit = execSync("cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 'N/A'").toString().trim();
+    const memCurrent = execSync("cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo 'N/A'").toString().trim();
+    const limitMB = memLimit === 'max' || memLimit === 'N/A' ? memLimit : (parseInt(memLimit) / 1024 / 1024).toFixed(0) + 'MB';
+    const currentMB = memCurrent === 'N/A' ? memCurrent : (parseInt(memCurrent) / 1024 / 1024).toFixed(0) + 'MB';
+    console.log(`[DIAG ${label}] Container memory: ${currentMB} / ${limitMB}`);
+  } catch (_) {}
+  try {
+    // Count Chrome processes and their RSS
+    const ps = execSync("ps aux 2>/dev/null | grep -i chrom | grep -v grep || echo 'no chrome processes'").toString().trim();
+    const lines = ps.split("\n").filter(l => !l.includes("no chrome"));
+    if (lines.length > 0) {
+      let totalRssKB = 0;
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        totalRssKB += parseInt(parts[5]) || 0;
+      }
+      console.log(`[DIAG ${label}] Chrome: ${lines.length} processes, total RSS=${(totalRssKB / 1024).toFixed(0)}MB`);
+    }
+  } catch (_) {}
+}
 
 // keep state of current battery level and whether the device is charging
 const batteryStore = {};
@@ -24,20 +66,19 @@ const batteryStore = {};
     }
   }
 
-  let browser = await launchBrowserAndLogin();
-
   if (config.debug) {
     console.log(
       "Debug mode active, will only render once in non-headless model and keep page open"
     );
+    const browser = await launchBrowserAndLogin();
     renderAndConvertAsync(browser);
   } else {
     console.log("Starting first render...");
-    browser = await renderAndConvertAsync(browser);
+    await renderAndConvertAsync();
     console.log("Starting rendering cronjob...");
     new CronJob(
       String(config.cronJob),
-      async () => { browser = await renderAndConvertAsync(browser); },
+      () => renderAndConvertAsync(),
       null,
       true
     );
@@ -127,6 +168,7 @@ const batteryStore = {};
 })();
 
 async function launchBrowserAndLogin() {
+  logDiagnostics("pre-launch");
   console.log("Starting browser...");
   const browser = await puppeteer.launch({
     args: [
@@ -150,6 +192,20 @@ async function launchBrowserAndLogin() {
     headless: config.debug !== true
   });
 
+  browser.on('disconnected', () => {
+    console.error('[DIAG] Browser disconnected!');
+    logDiagnostics("browser-disconnected");
+  });
+
+  browser.on('targetdestroyed', (target) => {
+    console.warn(`[DIAG] Target destroyed: type=${target.type()} url=${target.url()}`);
+  });
+
+  browser.process()?.on('exit', (code, signal) => {
+    console.error(`[DIAG] Chrome process exited: code=${code} signal=${signal}`);
+  });
+
+  logDiagnostics("post-launch");
   console.log(`Visiting '${config.baseUrl}' to login...`);
   const page = await browser.newPage();
   await page.goto(config.baseUrl, {
@@ -194,63 +250,60 @@ async function launchBrowserAndLogin() {
   return browser;
 }
 
-async function ensureBrowser(browser) {
-  if (browser && browser.connected) return browser;
-  console.log("Browser disconnected, relaunching...");
-  try { await browser.close(); } catch (_) {}
-  return await launchBrowserAndLogin();
-}
+async function renderAndConvertAsync(existingBrowser) {
+  const browser = existingBrowser || await launchBrowserAndLogin();
+  try {
+    for (let pageIndex = 0; pageIndex < config.pages.length; pageIndex++) {
+      const pageConfig = config.pages[pageIndex];
+      const pageBatteryStore = batteryStore[pageIndex];
 
-async function renderAndConvertAsync(browser) {
-  browser = await ensureBrowser(browser);
-  for (let pageIndex = 0; pageIndex < config.pages.length; pageIndex++) {
-    const pageConfig = config.pages[pageIndex];
-    const pageBatteryStore = batteryStore[pageIndex];
+      const url = `${config.baseUrl}${pageConfig.screenShotUrl}`;
 
-    const url = `${config.baseUrl}${pageConfig.screenShotUrl}`;
+      const outputPath = pageConfig.outputPath + "." + pageConfig.imageFormat;
+      await fsExtra.ensureDir(path.dirname(outputPath));
 
-    const outputPath = pageConfig.outputPath + "." + pageConfig.imageFormat;
-    await fsExtra.ensureDir(path.dirname(outputPath));
+      const tempPath = outputPath + ".temp";
 
-    const tempPath = outputPath + ".temp";
+      console.log(`Rendering ${url} to image...`);
+      await renderUrlToImageAsync(browser, pageConfig, url, tempPath);
 
-    console.log(`Rendering ${url} to image...`);
-    await renderUrlToImageAsync(browser, pageConfig, url, tempPath);
-
-    // Check if the temp file was actually created before trying to convert it
-    try {
-      await fs.access(tempPath);
-      console.log(`Converting rendered screenshot of ${url} to grayscale...`);
-      await convertImageToKindleCompatiblePngAsync(
-        pageConfig,
-        tempPath,
-        outputPath
-      );
-      fs.unlink(tempPath);
-      console.log(`Finished ${url}`);
-    } catch (e) {
-      console.error(`Failed for ${url}: ${e.message}`);
-      // Still try to clean up in case a partial file was created
+      // Check if the temp file was actually created before trying to convert it
       try {
-        await fs.unlink(tempPath);
-      } catch (unlinkError) {
-        // Ignore error if file doesn't exist
+        await fs.access(tempPath);
+        console.log(`Converting rendered screenshot of ${url} to grayscale...`);
+        await convertImageToKindleCompatiblePngAsync(
+          pageConfig,
+          tempPath,
+          outputPath
+        );
+        fs.unlink(tempPath);
+        console.log(`Finished ${url}`);
+      } catch (e) {
+        console.error(`Failed for ${url}: ${e.message}`);
+        try {
+          await fs.unlink(tempPath);
+        } catch (unlinkError) {
+          // Ignore error if file doesn't exist
+        }
+      }
+
+      if (
+        pageBatteryStore &&
+        pageBatteryStore.batteryLevel !== null &&
+        pageConfig.batteryWebHook
+      ) {
+        sendBatteryLevelToHomeAssistant(
+          pageIndex,
+          pageBatteryStore,
+          pageConfig.batteryWebHook
+        );
       }
     }
-
-    if (
-      pageBatteryStore &&
-      pageBatteryStore.batteryLevel !== null &&
-      pageConfig.batteryWebHook
-    ) {
-      sendBatteryLevelToHomeAssistant(
-        pageIndex,
-        pageBatteryStore,
-        pageConfig.batteryWebHook
-      );
+  } finally {
+    if (!existingBrowser) {
+      try { await browser.close(); } catch (_) {}
     }
   }
-  return browser;
 }
 
 function sendBatteryLevelToHomeAssistant(
@@ -283,25 +336,7 @@ function sendBatteryLevelToHomeAssistant(
   req.end();
 }
 
-async function renderUrlToImageAsync(browser, pageConfig, url, path, retries = 3) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    if (!browser.connected) {
-      console.error(`Browser disconnected, cannot render ${url}`);
-      return;
-    }
-    const success = await attemptRender(browser, pageConfig, url, path);
-    if (success) return;
-    if (attempt < retries) {
-      const delay = attempt * 5000;
-      console.log(`Render attempt ${attempt} failed, retrying in ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    } else {
-      console.error(`All ${retries} render attempts failed for ${url}`);
-    }
-  }
-}
-
-async function attemptRender(browser, pageConfig, url, path) {
+async function renderUrlToImageAsync(browser, pageConfig, url, path) {
   let page;
   try {
     page = await browser.newPage();
@@ -338,6 +373,7 @@ async function attemptRender(browser, pageConfig, url, path) {
 
     await page.setViewport(size);
 
+    logDiagnostics("pre-navigate");
     console.log(`Navigating to ${url}...`);
     await page.goto(url, {
       waitUntil: ["domcontentloaded", "load", "networkidle2"],
@@ -382,6 +418,7 @@ async function attemptRender(browser, pageConfig, url, path) {
       await new Promise(resolve => setTimeout(resolve, pageConfig.renderingDelay));
     }
 
+    logDiagnostics("pre-screenshot");
     console.log(`Taking screenshot...`);
     await page.screenshot({
       path,
@@ -394,11 +431,10 @@ async function attemptRender(browser, pageConfig, url, path) {
       }
     });
 
+    logDiagnostics("post-screenshot");
     console.log(`Successfully rendered screenshot for ${url}`);
-    return true;
   } catch (e) {
     console.error(`Failed to render ${url}:`, e.message);
-    return false;
   } finally {
     if (config.debug === false && page) {
       try {
