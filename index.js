@@ -192,14 +192,14 @@ async function renderAndConvertAsync(browser) {
     // Check if the temp file was actually created before trying to convert it
     try {
       await fs.access(tempPath);
-    console.log(`Converting rendered screenshot of ${url} to grayscale...`);
-    await convertImageToKindleCompatiblePngAsync(
-      pageConfig,
-      tempPath,
-      outputPath
-    );
-    fs.unlink(tempPath);
-    console.log(`Finished ${url}`);
+      console.log(`Converting rendered screenshot of ${url} to grayscale...`);
+      await convertImageToKindleCompatiblePngAsync(
+        pageConfig,
+        tempPath,
+        outputPath
+      );
+      fs.unlink(tempPath);
+      console.log(`Finished ${url}`);
     } catch (e) {
       console.error(`Screenshot failed for ${url}, skipping conversion. Temp file not found: ${tempPath}`);
       // Still try to clean up in case a partial file was created
@@ -293,7 +293,7 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
 
     console.log(`Navigating to ${url}...`);
     await page.goto(url, {
-      waitUntil: ["domcontentloaded", "load", "networkidle0"],
+      waitUntil: ["domcontentloaded", "load", "networkidle2"],
       timeout: config.renderingTimeout
     });
 
@@ -352,7 +352,11 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
     console.error(`Failed to render ${url}:`, e.message);
   } finally {
     if (config.debug === false && page) {
-      await page.close();
+      try {
+        await page.close();
+      } catch (closeErr) {
+        console.warn(`Could not close page for ${url}: ${closeErr.message}`);
+      }
     }
   }
 }
