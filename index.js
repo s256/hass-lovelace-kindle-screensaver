@@ -189,15 +189,26 @@ async function renderAndConvertAsync(browser) {
     console.log(`Rendering ${url} to image...`);
     await renderUrlToImageAsync(browser, pageConfig, url, tempPath);
 
+    // Check if the temp file was actually created before trying to convert it
+    try {
+      await fs.access(tempPath);
     console.log(`Converting rendered screenshot of ${url} to grayscale...`);
     await convertImageToKindleCompatiblePngAsync(
       pageConfig,
       tempPath,
       outputPath
     );
-
     fs.unlink(tempPath);
     console.log(`Finished ${url}`);
+    } catch (e) {
+      console.error(`Screenshot failed for ${url}, skipping conversion. Temp file not found: ${tempPath}`);
+      // Still try to clean up in case a partial file was created
+      try {
+        await fs.unlink(tempPath);
+      } catch (unlinkError) {
+        // Ignore error if file doesn't exist
+      }
+    }
 
     if (
       pageBatteryStore &&
