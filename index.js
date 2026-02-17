@@ -366,109 +366,31 @@ async function convertImageToKindleCompatiblePngAsync(
   inputPath,
   outputPath
 ) {
-  try {
-    let image = sharp(inputPath);
+  return new Promise((resolve, reject) => {
+    let gmInstance = gm(inputPath)
+      .options({
+        imageMagick: config.useImageMagick === true
+      })
+      .gamma(pageConfig.removeGamma ? 1.0 / 2.2 : 1.0)
+      .modulate(100, 100 * pageConfig.saturation)
+      .contrast(pageConfig.contrast)
+      .dither(pageConfig.dither)
+      .rotate("white", pageConfig.rotation)
+      .type(pageConfig.colorMode)
+      .level(pageConfig.blackLevel, pageConfig.whiteLevel)
+      .bitdepth(pageConfig.grayscaleDepth);
 
-    // Apply gamma correction if needed
-    if (pageConfig.removeGamma) {
-      image = image.gamma(1.0 / 2.2);
+    // For BMP format, we don't set quality since it's not applicable
+    if (pageConfig.imageFormat !== 'bmp') {
+      gmInstance = gmInstance.quality(100);
     }
 
-    // Apply rotation if needed
-    const rotation = Number(pageConfig.rotation);
-    if (rotation !== 0) {
-      image = image.rotate(rotation, { background: '#ffffff' });
-    }
-
-    // Convert to grayscale and apply color mode
-    if (pageConfig.colorMode === 'GrayScale' || pageConfig.colorMode === 'Grayscale') {
-      image = image.grayscale();
-    }
-
-    // Apply modulation (saturation adjustment)
-    if (pageConfig.saturation !== 1) {
-      image = image.modulate({
-        saturation: pageConfig.saturation
-      });
-    }
-
-    // Apply contrast and other adjustments
-    if (pageConfig.contrast !== 1) {
-      // Sharp uses linear transformation for contrast adjustment
-      image = image.linear(pageConfig.contrast, -(128 * pageConfig.contrast) + 128);
-    }
-
-    // Apply level adjustments (black and white levels)
-    if (pageConfig.blackLevel !== '0%' || pageConfig.whiteLevel !== '100%') {
-      // Parse percentage values
-      const blackLevel = parseInt(pageConfig.blackLevel.replace('%', '')) / 100;
-      const whiteLevel = parseInt(pageConfig.whiteLevel.replace('%', '')) / 100;
-
-      // Apply level adjustment using Sharp's normalize
-      if (blackLevel > 0 || whiteLevel < 1) {
-        const inputMin = Math.round(blackLevel * 255);
-        const inputMax = Math.round(whiteLevel * 255);
-        const multiplier = 255 / (inputMax - inputMin);
-        const offset = -inputMin * multiplier;
-
-        image = image.linear(multiplier, offset);
+    gmInstance.write(outputPath, (err) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
       }
-    }
-
-    // Apply dithering through Sharp's processing (limited support)
-    // Note: Sharp doesn't have direct dithering support like GM
-    if (pageConfig.dither) {
-      // Apply slight noise to simulate dithering effect for e-ink displays
-      image = image.sharpen({ sigma: 0.5, m1: 0.5, m2: 2, x1: 2, y2: 10, y3: 20 });
-    }
-
-    // Determine output format and apply format-specific options
-    switch (pageConfig.imageFormat.toLowerCase()) {
-      case 'png':
-        // For grayscale PNG, ensure proper format instead of indexed color
-        if (pageConfig.colorMode === 'GrayScale' || pageConfig.colorMode === 'Grayscale') {
-          if (pageConfig.grayscaleDepth === 4) {
-            // For 4-bit grayscale, reduce to 16 levels and ensure grayscale format
-            image = image
-              .toColorspace('b-w') // Force grayscale colorspace
-              .png({
-                quality: 100,
-                compressionLevel: 9,
-                palette: false, // Ensure no palette/indexed color
-                colours: 16 // Limit to 16 colors for 4-bit
-              });
-          } else {
-            // For 8-bit grayscale - force grayscale colorspace
-            image = image
-              .toColorspace('b-w') // Force grayscale colorspace
-              .png({
-                quality: 100,
-                compressionLevel: 9,
-                palette: false // Ensure no palette/indexed color
-              });
-          }
-        } else {
-          image = image.png({
-            quality: 100,
-            compressionLevel: 9
-          });
-        }
-        break;
-      case 'bmp':
-        image = image.bmp();
-        break;
-      case 'jpg':
-      case 'jpeg':
-        image = image.jpeg({ quality: 100 });
-        break;
-      default:
-        image = image.png({ quality: 100 });
-    }
-
-    // Write the processed image
-    await image.toFile(outputPath);
-
-  } catch (error) {
-    throw error;
-  }
+    });
+  });
 }
