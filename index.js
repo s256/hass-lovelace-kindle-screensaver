@@ -50,6 +50,7 @@ const batteryStore = {};
   console.log(`Visiting '${config.baseUrl}' to login...`);
   let page = await browser.newPage();
   await page.goto(config.baseUrl, {
+    waitUntil: ["domcontentloaded", "load", "networkidle2"],
     timeout: config.renderingTimeout
   });
 
@@ -61,18 +62,32 @@ const batteryStore = {};
 
   console.log("Adding authentication entry to browser's local storage...");
 
-  await page.evaluate(
-    (hassTokens, selectedLanguage, selectedTheme) => {
-      localStorage.setItem("hassTokens", hassTokens);
-      localStorage.setItem("selectedLanguage", selectedLanguage);
-      localStorage.setItem("selectedTheme", selectedTheme);
-    },
-    JSON.stringify(hassTokens),
-    JSON.stringify(config.language),
-    JSON.stringify(config.theme)
-  );
+  // HA may redirect after load, so retry if execution context is destroyed
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await page.evaluate(
+        (hassTokens, selectedLanguage, selectedTheme) => {
+          localStorage.setItem("hassTokens", hassTokens);
+          localStorage.setItem("selectedLanguage", selectedLanguage);
+          localStorage.setItem("selectedTheme", selectedTheme);
+        },
+        JSON.stringify(hassTokens),
+        JSON.stringify(config.language),
+        JSON.stringify(config.theme)
+      );
+      break;
+    } catch (e) {
+      if (attempt < 3) {
+        console.log(`localStorage setup interrupted by navigation (attempt ${attempt}), waiting for page to settle...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        await page.waitForNavigation({ waitUntil: "networkidle2", timeout: config.renderingTimeout }).catch(() => {});
+      } else {
+        throw e;
+      }
+    }
+  }
 
-  page.close();
+  await page.close();
 
   if (config.debug) {
     console.log(
