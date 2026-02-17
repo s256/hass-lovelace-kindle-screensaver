@@ -415,31 +415,50 @@ async function convertImageToKindleCompatiblePngAsync(
   inputPath,
   outputPath
 ) {
-  return new Promise((resolve, reject) => {
-    let gmInstance = gm(inputPath)
-      .options({
-        imageMagick: config.useImageMagick === true
-      })
-      .gamma(pageConfig.removeGamma ? 1.0 / 2.2 : 1.0)
-      .modulate(100, 100 * pageConfig.saturation)
-      .contrast(pageConfig.contrast)
-      .dither(pageConfig.dither)
-      .rotate("white", pageConfig.rotation)
-      .type(pageConfig.colorMode)
-      .level(pageConfig.blackLevel, pageConfig.whiteLevel)
-      .bitdepth(pageConfig.grayscaleDepth);
+  let image = sharp(inputPath);
 
-    // For BMP format, we don't set quality since it's not applicable
-    if (pageConfig.imageFormat !== 'bmp') {
-      gmInstance = gmInstance.quality(100);
+  if (pageConfig.removeGamma) {
+    image = image.gamma(1.0 / 2.2);
   }
 
-    gmInstance.write(outputPath, (err) => {
-      if (err) {
-        reject(err);
+  const rotation = Number(pageConfig.rotation);
+  if (rotation !== 0) {
+    image = image.rotate(rotation, { background: '#ffffff' });
+  }
+
+  if (pageConfig.colorMode === 'GrayScale' || pageConfig.colorMode === 'Grayscale') {
+    image = image.grayscale();
+  }
+
+  if (pageConfig.saturation !== 1) {
+    image = image.modulate({ saturation: pageConfig.saturation });
+  }
+
+  if (pageConfig.contrast !== 1) {
+    image = image.linear(pageConfig.contrast, -(128 * pageConfig.contrast) + 128);
+  }
+
+  if (pageConfig.blackLevel !== '0%' || pageConfig.whiteLevel !== '100%') {
+    const blackLevel = parseInt(pageConfig.blackLevel) / 100;
+    const whiteLevel = parseInt(pageConfig.whiteLevel) / 100;
+    if (blackLevel > 0 || whiteLevel < 1) {
+      const inputMin = Math.round(blackLevel * 255);
+      const inputMax = Math.round(whiteLevel * 255);
+      const multiplier = 255 / (inputMax - inputMin);
+      const offset = -inputMin * multiplier;
+      image = image.linear(multiplier, offset);
+    }
+  }
+
+  if (pageConfig.dither) {
+    image = image.sharpen({ sigma: 0.5 });
+  }
+
+  if (pageConfig.colorMode === 'GrayScale' || pageConfig.colorMode === 'Grayscale') {
+    image = image.toColorspace('b-w').png({ compressionLevel: 9, palette: false });
   } else {
-        resolve();
+    image = image.png({ compressionLevel: 9 });
   }
-    });
-  });
+
+  await image.toFile(outputPath);
 }
