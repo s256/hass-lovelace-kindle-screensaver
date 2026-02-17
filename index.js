@@ -8,47 +8,6 @@ const puppeteer = require("puppeteer");
 const { CronJob } = require("cron");
 const sharp = require("sharp");
 
-function logDiagnostics(label) {
-  try {
-    const memUsage = process.memoryUsage();
-    const nodeMemMB = {
-      rss: (memUsage.rss / 1024 / 1024).toFixed(1),
-      heapUsed: (memUsage.heapUsed / 1024 / 1024).toFixed(1),
-      heapTotal: (memUsage.heapTotal / 1024 / 1024).toFixed(1),
-    };
-    console.log(`[DIAG ${label}] Node memory: rss=${nodeMemMB.rss}MB heap=${nodeMemMB.heapUsed}/${nodeMemMB.heapTotal}MB`);
-  } catch (_) {}
-  try {
-    // Check /dev/shm usage (common Docker issue)
-    const shmDf = execSync("df -h /dev/shm 2>/dev/null || echo 'N/A'").toString().trim();
-    const shmLines = shmDf.split("\n");
-    if (shmLines.length > 1) {
-      console.log(`[DIAG ${label}] /dev/shm: ${shmLines[1]}`);
-    }
-  } catch (_) {}
-  try {
-    // Check container memory limit via cgroup
-    const memLimit = execSync("cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 'N/A'").toString().trim();
-    const memCurrent = execSync("cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo 'N/A'").toString().trim();
-    const limitMB = memLimit === 'max' || memLimit === 'N/A' ? memLimit : (parseInt(memLimit) / 1024 / 1024).toFixed(0) + 'MB';
-    const currentMB = memCurrent === 'N/A' ? memCurrent : (parseInt(memCurrent) / 1024 / 1024).toFixed(0) + 'MB';
-    console.log(`[DIAG ${label}] Container memory: ${currentMB} / ${limitMB}`);
-  } catch (_) {}
-  try {
-    // Count Chrome processes and their RSS
-    const ps = execSync("ps aux 2>/dev/null | grep -i chrom | grep -v grep || echo 'no chrome processes'").toString().trim();
-    const lines = ps.split("\n").filter(l => !l.includes("no chrome"));
-    if (lines.length > 0) {
-      let totalRssKB = 0;
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        totalRssKB += parseInt(parts[5]) || 0;
-      }
-      console.log(`[DIAG ${label}] Chrome: ${lines.length} processes, total RSS=${(totalRssKB / 1024).toFixed(0)}MB`);
-    }
-  } catch (_) {}
-}
-
 // keep state of current battery level and whether the device is charging
 const batteryStore = {};
 
@@ -167,7 +126,6 @@ const batteryStore = {};
 })();
 
 async function launchBrowserAndLogin() {
-  logDiagnostics("pre-launch");
   console.log("Starting browser...");
   const browser = await puppeteer.launch({
     args: [
@@ -191,20 +149,6 @@ async function launchBrowserAndLogin() {
     headless: config.debug !== true
   });
 
-  browser.on('disconnected', () => {
-    console.error('[DIAG] Browser disconnected!');
-    logDiagnostics("browser-disconnected");
-  });
-
-  browser.on('targetdestroyed', (target) => {
-    console.warn(`[DIAG] Target destroyed: type=${target.type()} url=${target.url()}`);
-  });
-
-  browser.process()?.on('exit', (code, signal) => {
-    console.error(`[DIAG] Chrome process exited: code=${code} signal=${signal}`);
-  });
-
-  logDiagnostics("post-launch");
   console.log(`Visiting '${config.baseUrl}' to login...`);
   const page = await browser.newPage();
   await page.goto(config.baseUrl, {
@@ -379,7 +323,6 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
 
     await page.setViewport(size);
 
-    logDiagnostics("pre-navigate");
     console.log(`Navigating to ${url}...`);
     await page.goto(url, {
       waitUntil: ["domcontentloaded", "load", "networkidle2"],
@@ -424,7 +367,6 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
       await new Promise(resolve => setTimeout(resolve, pageConfig.renderingDelay));
     }
 
-    logDiagnostics("pre-screenshot");
     console.log(`Taking screenshot...`);
     await page.screenshot({
       path,
@@ -437,7 +379,6 @@ async function renderUrlToImageAsync(browser, pageConfig, url, path) {
       }
     });
 
-    logDiagnostics("post-screenshot");
     console.log(`Successfully rendered screenshot for ${url}`);
   } catch (e) {
     console.error(`Failed to render ${url}:`, e.message);
