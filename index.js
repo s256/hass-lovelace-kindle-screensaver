@@ -24,70 +24,7 @@ const batteryStore = {};
     }
   }
 
-  console.log("Starting browser...");
-  let browser = await puppeteer.launch({
-    args: [
-      "--disable-dev-shm-usage",
-      "--no-sandbox",
-      "--disable-gpu",
-      "--disable-software-rasterizer",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-renderer-backgrounding",
-      "--disable-features=TranslateUI",
-      "--disable-ipc-flooding-protection",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--no-zygote",
-      `--lang=${config.language}`,
-      config.ignoreCertificateErrors && "--ignore-certificate-errors"
-    ].filter((x) => x),
-    defaultViewport: null,
-    timeout: config.browserLaunchTimeout,
-    headless: config.debug !== true
-  });
-
-  console.log(`Visiting '${config.baseUrl}' to login...`);
-  let page = await browser.newPage();
-  await page.goto(config.baseUrl, {
-    waitUntil: ["domcontentloaded", "load", "networkidle2"],
-    timeout: config.renderingTimeout
-  });
-
-  const hassTokens = {
-    hassUrl: config.baseUrl,
-    access_token: config.accessToken,
-    token_type: "Bearer"
-  };
-
-  console.log("Adding authentication entry to browser's local storage...");
-
-  // HA may redirect after load, so retry if execution context is destroyed
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      await page.evaluate(
-        (hassTokens, selectedLanguage, selectedTheme) => {
-          localStorage.setItem("hassTokens", hassTokens);
-          localStorage.setItem("selectedLanguage", selectedLanguage);
-          localStorage.setItem("selectedTheme", selectedTheme);
-        },
-        JSON.stringify(hassTokens),
-        JSON.stringify(config.language),
-        JSON.stringify(config.theme)
-      );
-      break;
-    } catch (e) {
-      if (attempt < 3) {
-        console.log(`localStorage setup interrupted by navigation (attempt ${attempt}), waiting for page to settle...`);
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        await page.waitForNavigation({ waitUntil: "networkidle2", timeout: config.renderingTimeout }).catch(() => {});
-      } else {
-        throw e;
-      }
-    }
-  }
-
-  await page.close();
+  let browser = await launchBrowserAndLogin();
 
   if (config.debug) {
     console.log(
@@ -96,11 +33,11 @@ const batteryStore = {};
     renderAndConvertAsync(browser);
   } else {
     console.log("Starting first render...");
-    await renderAndConvertAsync(browser);
+    browser = await renderAndConvertAsync(browser);
     console.log("Starting rendering cronjob...");
     new CronJob(
       String(config.cronJob),
-      () => renderAndConvertAsync(browser),
+      async () => { browser = await renderAndConvertAsync(browser); },
       null,
       true
     );
@@ -189,7 +126,83 @@ const batteryStore = {};
   });
 })();
 
+async function launchBrowserAndLogin() {
+  console.log("Starting browser...");
+  const browser = await puppeteer.launch({
+    args: [
+      "--disable-dev-shm-usage",
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-software-rasterizer",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-features=TranslateUI",
+      "--disable-ipc-flooding-protection",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--no-zygote",
+      `--lang=${config.language}`,
+      config.ignoreCertificateErrors && "--ignore-certificate-errors"
+    ].filter((x) => x),
+    defaultViewport: null,
+    timeout: config.browserLaunchTimeout,
+    headless: config.debug !== true
+  });
+
+  console.log(`Visiting '${config.baseUrl}' to login...`);
+  const page = await browser.newPage();
+  await page.goto(config.baseUrl, {
+    waitUntil: ["domcontentloaded", "load", "networkidle2"],
+    timeout: config.renderingTimeout
+  });
+
+  const hassTokens = {
+    hassUrl: config.baseUrl,
+    access_token: config.accessToken,
+    token_type: "Bearer"
+  };
+
+  console.log("Adding authentication entry to browser's local storage...");
+
+  // HA may redirect after load, so retry if execution context is destroyed
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await page.evaluate(
+        (hassTokens, selectedLanguage, selectedTheme) => {
+          localStorage.setItem("hassTokens", hassTokens);
+          localStorage.setItem("selectedLanguage", selectedLanguage);
+          localStorage.setItem("selectedTheme", selectedTheme);
+        },
+        JSON.stringify(hassTokens),
+        JSON.stringify(config.language),
+        JSON.stringify(config.theme)
+      );
+      break;
+    } catch (e) {
+      if (attempt < 3) {
+        console.log(`localStorage setup interrupted by navigation (attempt ${attempt}), waiting for page to settle...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        await page.waitForNavigation({ waitUntil: "networkidle2", timeout: config.renderingTimeout }).catch(() => {});
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  await page.close();
+  return browser;
+}
+
+async function ensureBrowser(browser) {
+  if (browser && browser.connected) return browser;
+  console.log("Browser disconnected, relaunching...");
+  try { await browser.close(); } catch (_) {}
+  return await launchBrowserAndLogin();
+}
+
 async function renderAndConvertAsync(browser) {
+  browser = await ensureBrowser(browser);
   for (let pageIndex = 0; pageIndex < config.pages.length; pageIndex++) {
     const pageConfig = config.pages[pageIndex];
     const pageBatteryStore = batteryStore[pageIndex];
@@ -216,7 +229,7 @@ async function renderAndConvertAsync(browser) {
       fs.unlink(tempPath);
       console.log(`Finished ${url}`);
     } catch (e) {
-      console.error(`Screenshot failed for ${url}, skipping conversion. Temp file not found: ${tempPath}`);
+      console.error(`Failed for ${url}: ${e.message}`);
       // Still try to clean up in case a partial file was created
       try {
         await fs.unlink(tempPath);
@@ -237,6 +250,7 @@ async function renderAndConvertAsync(browser) {
       );
     }
   }
+  return browser;
 }
 
 function sendBatteryLevelToHomeAssistant(
@@ -271,6 +285,10 @@ function sendBatteryLevelToHomeAssistant(
 
 async function renderUrlToImageAsync(browser, pageConfig, url, path, retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
+    if (!browser.connected) {
+      console.error(`Browser disconnected, cannot render ${url}`);
+      return;
+    }
     const success = await attemptRender(browser, pageConfig, url, path);
     if (success) return;
     if (attempt < retries) {
@@ -414,14 +432,14 @@ async function convertImageToKindleCompatiblePngAsync(
     // For BMP format, we don't set quality since it's not applicable
     if (pageConfig.imageFormat !== 'bmp') {
       gmInstance = gmInstance.quality(100);
-    }
+  }
 
     gmInstance.write(outputPath, (err) => {
       if (err) {
         reject(err);
-      } else {
+  } else {
         resolve();
-      }
+  }
     });
   });
 }
