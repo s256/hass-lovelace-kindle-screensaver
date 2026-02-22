@@ -216,6 +216,7 @@ function getContentType(ext) {
     '.html': 'text/html',
     '.css': 'text/css',
     '.js': 'application/javascript',
+    '.sh': 'text/plain',
     '.conf': 'text/plain',
     '.ini': 'text/plain',
     '.cfg': 'text/plain',
