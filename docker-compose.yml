@@ -5,6 +5,7 @@ services:
     networks:
       - traefik_proxy  
     environment:
+      - CONFIG_DIR=/kindle-config
       - TZ=Europe/Berlin
       - HA_BASE_URL=http://localhost:8123
       - HA_SCREENSHOT_URL=/lovelace?kiosk
