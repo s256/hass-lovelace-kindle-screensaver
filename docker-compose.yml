@@ -26,6 +26,7 @@ services:
       - /tmp:size=512M
     volumes:
       - /opt/ha-kinde/data/output/:/output
+      - /opt/ha-kinde/data/kindle-config/:/kindle-config:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     labels:

@@ -29,6 +29,9 @@ RUN npm install --production
 
 COPY *.js ./
 
+RUN mkdir -p /kindle-config
+ENV CONFIG_DIR=/kindle-config
+
 EXPOSE 5000
 
 ENTRYPOINT ["dumb-init", "--"]

@@ -8,6 +8,9 @@ const puppeteer = require("puppeteer");
 const { CronJob } = require("cron");
 const sharp = require("sharp");
 
+// Config directory for additional files that Kindle can download
+const CONFIG_DIR = process.env.CONFIG_DIR || path.join(__dirname, "kindle-config");
+
 // keep state of current battery level and whether the device is charging
 const batteryStore = {};
 
@@ -45,85 +48,183 @@ const batteryStore = {};
   const httpServer = http.createServer(async (request, response) => {
     // Parse the request
     const url = new URL(request.url, `http://${request.headers.host}`);
-    // Check the page number
-    const pageNumberStr = url.pathname;
-    // and get the battery level, if any
-    // (see https://github.com/sibbl/hass-lovelace-kindle-screensaver/README.md for patch to generate it on Kindle)
-    const batteryLevel = parseInt(url.searchParams.get("batteryLevel"));
-    const isCharging = url.searchParams.get("isCharging");
-    const pageNumber =
-      pageNumberStr === "/" ? 1 : parseInt(pageNumberStr.substring(1));
-    if (
-      isFinite(pageNumber) === false ||
-      pageNumber > config.pages.length ||
-      pageNumber < 1
-    ) {
-      console.log(`Invalid request: ${request.url} for page ${pageNumber}`);
-      response.writeHead(400);
-      response.end("Invalid request");
+    const pathname = url.pathname;
+
+    // Handle config file requests
+    if (pathname.startsWith('/config/')) {
+      await handleConfigFileRequest(pathname, response);
       return;
     }
-    try {
-      // Log when the page was accessed
-      const n = new Date();
-      console.log(`${n.toISOString()}: Image ${pageNumber} was accessed`);
 
-      const pageIndex = pageNumber - 1;
-      const configPage = config.pages[pageIndex];
-
-      const outputPathWithExtension = configPage.outputPath + "." + configPage.imageFormat
-      const data = await fs.readFile(outputPathWithExtension);
-      const stat = await fs.stat(outputPathWithExtension);
-
-      const lastModifiedTime = new Date(stat.mtime).toUTCString();
-
-      response.writeHead(200, {
-        "Content-Type": "image/" + configPage.imageFormat,
-        "Content-Length": Buffer.byteLength(data),
-        "Last-Modified": lastModifiedTime
-      });
-      response.end(data);
-
-      let pageBatteryStore = batteryStore[pageIndex];
-      if (!pageBatteryStore) {
-        pageBatteryStore = batteryStore[pageIndex] = {
-          batteryLevel: null,
-          isCharging: false
-        };
-      }
-      if (!isNaN(batteryLevel) && batteryLevel >= 0 && batteryLevel <= 100) {
-        if (batteryLevel !== pageBatteryStore.batteryLevel) {
-          pageBatteryStore.batteryLevel = batteryLevel;
-          console.log(
-            `New battery level: ${batteryLevel} for page ${pageNumber}`
-          );
-        }
-
-        if (
-          (isCharging === "Yes" || isCharging === "1") &&
-          pageBatteryStore.isCharging !== true) {
-          pageBatteryStore.isCharging = true;
-          console.log(`Battery started charging for page ${pageNumber}`);
-        } else if (
-          (isCharging === "No" || isCharging === "0") &&
-          pageBatteryStore.isCharging !== false
-        ) {
-          console.log(`Battery stopped charging for page ${pageNumber}`);
-          pageBatteryStore.isCharging = false;
-        }
-      }
-    } catch (e) {
-      console.error(e);
-      response.writeHead(404);
-      response.end("Image not found");
-    }
+    // Handle image requests (existing functionality)
+    await handleImageRequest(url, request, response);
   });
 
   const port = config.port || 5000;
   httpServer.listen(port, () => {
     console.log(`Server is running at ${port}`);
+    console.log(`Config files will be served from: ${CONFIG_DIR}`);
   });
 })();
+
+// Handle config file requests with path traversal protection
+async function handleConfigFileRequest(pathname, response) {
+  try {
+    // Remove '/config/' prefix and decode URI component
+    const requestedPath = decodeURIComponent(pathname.substring(8));
+
+    // Prevent path traversal attacks
+    if (requestedPath.includes('..') || requestedPath.includes('\\') || path.isAbsolute(requestedPath)) {
+      console.log(`Blocked suspicious config file request: ${pathname}`);
+      response.writeHead(403);
+      response.end('Forbidden: Invalid path');
+      return;
+    }
+
+    // Resolve the full path and ensure it's within CONFIG_DIR
+    const fullPath = path.resolve(CONFIG_DIR, requestedPath);
+    const configDirResolved = path.resolve(CONFIG_DIR);
+
+    if (!fullPath.startsWith(configDirResolved + path.sep) && fullPath !== configDirResolved) {
+      console.log(`Blocked path traversal attempt: ${pathname}`);
+      response.writeHead(403);
+      response.end('Forbidden: Path traversal detected');
+      return;
+    }
+
+    // Check if file exists and is a file (not directory)
+    const stat = await fs.stat(fullPath);
+    if (!stat.isFile()) {
+      response.writeHead(404);
+      response.end('File not found');
+      return;
+    }
+
+    // Read and serve the file
+    const data = await fs.readFile(fullPath);
+    const lastModifiedTime = new Date(stat.mtime).toUTCString();
+
+    // Determine content type based on file extension
+    const ext = path.extname(fullPath).toLowerCase();
+    const contentType = getContentType(ext);
+
+    console.log(`${new Date().toISOString()}: Config file ${requestedPath} was accessed`);
+
+    response.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': Buffer.byteLength(data),
+      'Last-Modified': lastModifiedTime,
+      'Cache-Control': 'public, max-age=300' // Cache for 5 minutes
+    });
+    response.end(data);
+
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      console.log(`Config file not found: ${pathname}`);
+      response.writeHead(404);
+      response.end('File not found');
+    } else {
+      console.error(`Error serving config file ${pathname}:`, e);
+      response.writeHead(500);
+      response.end('Internal server error');
+    }
+  }
+}
+
+// Handle image requests (original functionality)
+async function handleImageRequest(url, request, response) {
+  // Check the page number
+  const pageNumberStr = url.pathname;
+  // and get the battery level, if any
+  // (see https://github.com/sibbl/hass-lovelace-kindle-screensaver/README.md for patch to generate it on Kindle)
+  const batteryLevel = parseInt(url.searchParams.get("batteryLevel"));
+  const isCharging = url.searchParams.get("isCharging");
+  const pageNumber =
+    pageNumberStr === "/" ? 1 : parseInt(pageNumberStr.substring(1));
+  if (
+    isFinite(pageNumber) === false ||
+    pageNumber > config.pages.length ||
+    pageNumber < 1
+  ) {
+    console.log(`Invalid request: ${request.url} for page ${pageNumber}`);
+    response.writeHead(400);
+    response.end("Invalid request");
+    return;
+  }
+  try {
+    // Log when the page was accessed
+    const n = new Date();
+    console.log(`${n.toISOString()}: Image ${pageNumber} was accessed`);
+
+    const pageIndex = pageNumber - 1;
+    const configPage = config.pages[pageIndex];
+
+    const outputPathWithExtension = configPage.outputPath + "." + configPage.imageFormat
+    const data = await fs.readFile(outputPathWithExtension);
+    const stat = await fs.stat(outputPathWithExtension);
+
+    const lastModifiedTime = new Date(stat.mtime).toUTCString();
+
+    response.writeHead(200, {
+      "Content-Type": "image/" + configPage.imageFormat,
+      "Content-Length": Buffer.byteLength(data),
+      "Last-Modified": lastModifiedTime
+    });
+    response.end(data);
+
+    let pageBatteryStore = batteryStore[pageIndex];
+    if (!pageBatteryStore) {
+      pageBatteryStore = batteryStore[pageIndex] = {
+        batteryLevel: null,
+        isCharging: false
+      };
+    }
+    if (!isNaN(batteryLevel) && batteryLevel >= 0 && batteryLevel <= 100) {
+      if (batteryLevel !== pageBatteryStore.batteryLevel) {
+        pageBatteryStore.batteryLevel = batteryLevel;
+        console.log(
+          `New battery level: ${batteryLevel} for page ${pageNumber}`
+        );
+      }
+
+      if (
+        (isCharging === "Yes" || isCharging === "1") &&
+        pageBatteryStore.isCharging !== true) {
+        pageBatteryStore.isCharging = true;
+        console.log(`Battery started charging for page ${pageNumber}`);
+      } else if (
+        (isCharging === "No" || isCharging === "0") &&
+        pageBatteryStore.isCharging !== false
+      ) {
+        console.log(`Battery stopped charging for page ${pageNumber}`);
+        pageBatteryStore.isCharging = false;
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    response.writeHead(404);
+    response.end("Image not found");
+  }
+}
+
+// Determine content type based on file extension
+function getContentType(ext) {
+  const contentTypes = {
+    '.txt': 'text/plain',
+    '.json': 'application/json',
+    '.xml': 'application/xml',
+    '.html': 'text/html',
+    '.css': 'text/css',
+    '.js': 'application/javascript',
+    '.conf': 'text/plain',
+    '.ini': 'text/plain',
+    '.cfg': 'text/plain',
+    '.yaml': 'text/yaml',
+    '.yml': 'text/yaml'
+  };
+
+  return contentTypes[ext] || 'application/octet-stream';
+}
 
 async function launchBrowserAndLogin() {
   console.log("Starting browser...");

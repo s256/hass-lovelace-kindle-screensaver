@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "device_name": "kindle-screensaver",
+  "refresh_interval": 300,
+  "battery_report_interval": 3600,
+  "debug_mode": false,
+  "display_settings": {
+    "orientation": "landscape",
+    "sleep_screen": true,
+    "low_battery_warning": 20
+  },
+  "network": {
+    "wifi_power_save": true,
+    "connection_timeout": 30
+  }
+}
