@@ -14,6 +14,34 @@ const CONFIG_DIR = process.env.CONFIG_DIR || path.join(__dirname, "kindle-config
 // keep state of current battery level and whether the device is charging
 const batteryStore = {};
 
+const CHROME_USER_DATA_DIR = path.join("/tmp", "chrome-profile");
+
+// Persistent browser instance reused across cron ticks
+let persistentBrowser = null;
+
+async function getOrLaunchBrowser() {
+  if (persistentBrowser) {
+    try {
+      await persistentBrowser.version();
+      return persistentBrowser;
+    } catch {
+      console.log("Browser is no longer responsive, relaunching...");
+      await killBrowser(persistentBrowser);
+      persistentBrowser = null;
+    }
+  }
+  persistentBrowser = await launchBrowserAndLogin();
+  return persistentBrowser;
+}
+
+async function killBrowser(browser) {
+  const proc = browser.process();
+  try { await browser.close(); } catch (_) {}
+  if (proc && !proc.killed) {
+    proc.kill('SIGKILL');
+  }
+}
+
 (async () => {
   if (config.pages.length === 0) {
     return console.error("Please check your configuration");
@@ -229,6 +257,10 @@ function getContentType(ext) {
 
 async function launchBrowserAndLogin() {
   console.log("Starting browser...");
+  // Clean up any stale profile data from previous runs
+  await fsExtra.remove(CHROME_USER_DATA_DIR).catch(() => {});
+  await fsExtra.ensureDir(CHROME_USER_DATA_DIR);
+
   const browser = await puppeteer.launch({
     args: [
       "--disable-dev-shm-usage",
@@ -243,9 +275,11 @@ async function launchBrowserAndLogin() {
       "--no-first-run",
       "--no-default-browser-check",
       "--no-zygote",
+      "--disk-cache-size=0",
       `--lang=${config.language}`,
       config.ignoreCertificateErrors && "--ignore-certificate-errors"
     ].filter((x) => x),
+    userDataDir: CHROME_USER_DATA_DIR,
     defaultViewport: null,
     timeout: config.browserLaunchTimeout,
     headless: config.debug !== true
@@ -296,7 +330,7 @@ async function launchBrowserAndLogin() {
 }
 
 async function renderAndConvertAsync(existingBrowser) {
-  const browser = existingBrowser || await launchBrowserAndLogin();
+  const browser = existingBrowser || await getOrLaunchBrowser();
   try {
     for (let pageIndex = 0; pageIndex < config.pages.length; pageIndex++) {
       const pageConfig = config.pages[pageIndex];
@@ -344,16 +378,12 @@ async function renderAndConvertAsync(existingBrowser) {
         );
       }
     }
-  } finally {
+  } catch (e) {
+    console.error("Render cycle failed:", e.message);
+    // If browser died mid-render, clear it so next tick gets a fresh one
     if (!existingBrowser) {
-      const proc = browser.process();
-      try { await browser.close(); } catch (_) {}
-      // Ensure Chrome process tree is fully dead — browser.close() can leave zombies
-      if (proc && !proc.killed) {
-        proc.kill('SIGKILL');
-      }
-      // Give OS a moment to reclaim memory
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await killBrowser(browser);
+      persistentBrowser = null;
     }
   }
 }
